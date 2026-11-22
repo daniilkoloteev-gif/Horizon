@@ -1,0 +1,88 @@
+# Build workflow for the phone-friendly setup: the repository contains only this file
+# (at .github/workflows/android.yml) and horizon-android-kit.zip in the repository root.
+name: android-apk
+
+on:
+  workflow_dispatch:
+    inputs:
+      horizon_ref:
+        description: "Horizon: branch, tag or commit"
+        required: false
+        default: "main"
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      # The repository itself (it holds the kit zip).
+      - uses: actions/checkout@v4
+
+      - name: Unpack the kit
+        run: |
+          ZIP="$(ls -1 ./*.zip | head -n 1)"
+          echo "Using $ZIP"
+          unzip -q "$ZIP" -d "$RUNNER_TEMP/unz"
+          mv "$RUNNER_TEMP/unz/horizon-android" kit
+          ls kit
+
+      - uses: actions/checkout@v4
+        with:
+          repository: horizon-rust/horizon
+          ref: ${{ inputs.horizon_ref }}
+          path: horizon
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27c
+          add-to-path: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: horizon
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Android SDK packages
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" > /dev/null
+
+      - name: Build APK
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          git -C horizon log -1 --oneline
+          bash kit/scripts/build-android.sh horizon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: horizon-debug-apk
+          path: kit/android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Save what the patcher changed in Horizon
+        if: always()
+        run: git -C horizon diff > horizon-android.patch || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: horizon-android-patch
+          path: horizon-android.patch
+          if-no-files-found: ignore
